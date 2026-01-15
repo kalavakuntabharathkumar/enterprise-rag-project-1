@@ -29,3 +29,16 @@ class Config:
     # rates differ.
     LLM_INPUT_COST_PER_1K = float(os.getenv("LLM_INPUT_COST_PER_1K", 0.0005))
     LLM_OUTPUT_COST_PER_1K = float(os.getenv("LLM_OUTPUT_COST_PER_1K", 0.0015))
+
+    # Self-hosted model server.
+    # LLM_BASE_URL: base URL of the inference server (no trailing slash,
+    # no /v1 suffix — the client appends the path).  Both vLLM and
+    # llama.cpp expose an OpenAI-compatible endpoint at /v1/chat/completions.
+    LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llm-server:8000")
+    # LLM_MODEL: model name sent in the request body.  For vLLM it must
+    # match the --model argument; for llama.cpp it may be any non-empty
+    # string (the server ignores it).
+    LLM_MODEL = os.getenv("LLM_MODEL", "mistral-7b-instruct")
+    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", 0.1))
+    # Seconds before the inference call is treated as failed.
+    LLM_TIMEOUT_SECS = float(os.getenv("LLM_TIMEOUT_SECS", 120.0))

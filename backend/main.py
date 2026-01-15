@@ -3,13 +3,13 @@ import time
 import uuid
 from typing import Optional
 
-import openai
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from analytics.metrics import summarize
 from analytics.query_log import QueryAnalytics
 from backend.config import Config
+from backend.inference_client import InferenceError
 from backend.latency import LatencyLog, start_recording
 from backend.logger import app_logger
 from backend.rag_pipeline import RAGPipeline
@@ -23,7 +23,7 @@ from backend.schemas import (
 )
 from backend.utils import save_uploaded_file
 
-app = FastAPI(title="Enterprise AI Document Assistant", version="1.1.0")
+app = FastAPI(title="Enterprise AI Document Assistant", version="1.2.0")
 
 rag_pipeline = RAGPipeline()
 latency_log = LatencyLog()
@@ -110,9 +110,9 @@ async def ask_question(request: QuestionRequest):
     try:
         result = rag_pipeline.ask_question(request.question)
         return AnswerResponse(**result)
-    except openai.OpenAIError as e:
-        app_logger.error(f"OpenAI API error while answering question: {e}")
-        raise HTTPException(status_code=502, detail="The language model provider is unavailable. Please try again shortly.")
+    except InferenceError as e:
+        app_logger.error(f"Model server error while answering question: {e}")
+        raise HTTPException(status_code=502, detail="The language model server is unavailable. Please try again shortly.")
     except Exception as e:
         app_logger.error(f"Error processing question: {e}")
         raise HTTPException(status_code=500, detail="Error processing question")
@@ -121,8 +121,7 @@ async def ask_question(request: QuestionRequest):
 @app.get("/health", response_model=HealthResponse, summary="Health check")
 async def health_check():
     """Report service health, including whether a vector index exists and
-    whether the OpenAI credentials required for embeddings/LLM calls are
-    configured."""
+    whether the OpenAI credentials required for embeddings are configured."""
     if rag_pipeline.retriever.vectorstore is None:
         rag_pipeline.retriever.load_vectorstore()
 

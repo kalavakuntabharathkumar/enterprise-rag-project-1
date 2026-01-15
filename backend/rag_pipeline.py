@@ -1,10 +1,10 @@
 import time
 
 from langchain_core.documents import Document
-from langchain_openai import ChatOpenAI
 
 from analytics.query_log import QueryAnalytics
 from backend.config import Config
+from backend.inference_client import InferenceError, generate as llm_generate
 from backend.latency import record_generation_time, record_retrieval_time
 from backend.logger import app_logger, query_logger
 from backend.retriever import DocumentRetriever
@@ -24,29 +24,17 @@ CANNED_RESPONSES = {
 
 class RAGPipeline:
     def __init__(self):
-        # `retriever` and `llm` touch OpenAI credentials lazily (see the
-        # `llm` property and DocumentRetriever's own lazy embeddings), so
-        # RAGPipeline - and therefore the FastAPI app - can be constructed
-        # at import time even when OPENAI_API_KEY isn't set yet. This is
-        # what lets /health report openai_configured=false instead of the
-        # process failing to boot.
+        # `retriever` touches OpenAI credentials lazily (see DocumentRetriever's
+        # own lazy embeddings), so RAGPipeline — and therefore the FastAPI app —
+        # can be constructed at import time even when OPENAI_API_KEY isn't set
+        # yet.  This is what lets /health report openai_configured=false instead
+        # of the process failing to boot.
         self.retriever = DocumentRetriever()
-        self._llm = None
         self.preprocessor = PreprocessingPipeline(min_quality=Config.MIN_CHUNK_QUALITY)
         self.intent_classifier = IntentClassifier()
         self.query_type_classifier = QueryTypeClassifier()
         self.reranker = LexicalReranker()
         self.analytics = QueryAnalytics()
-
-    @property
-    def llm(self):
-        if self._llm is None:
-            self._llm = ChatOpenAI(
-                openai_api_key=Config.OPENAI_API_KEY,
-                model_name="gpt-3.5-turbo",
-                temperature=0.1
-            )
-        return self._llm
 
     def process_pdf(self, file_path: str):
         """Process PDF: extract, clean, chunk, dedupe, score, embed, store."""
@@ -135,7 +123,7 @@ class RAGPipeline:
             # Factual questions that retrieval already answers with high
             # confidence skip the LLM entirely: composing a sentence
             # around one clearly-retrieved fact doesn't need generation,
-            # and it saves the latency/cost of a completion call.
+            # and it saves the latency of a completion call.
             if query_type == "factual" and top_similarity >= Config.FACTUAL_DIRECT_THRESHOLD:
                 record_generation_time(0.0)
                 answer = docs[0].page_content.strip()
@@ -151,21 +139,18 @@ class RAGPipeline:
                     "query_type": query_type,
                 }
 
-            prompt = f"""
-            Based on the following context, answer the question accurately. If the context doesn't contain enough information to answer confidently, say so.
+            prompt = f"""Based on the following context, answer the question accurately. If the context doesn't contain enough information to answer confidently, say so.
 
-            Context:
-            {context}
+Context:
+{context}
 
-            Question: {question}
+Question: {question}
 
-            Answer concisely and cite sources if possible.
-            """
+Answer concisely and cite sources if possible."""
 
             generation_start = time.time()
-            response = self.llm.invoke(prompt)
+            answer = llm_generate(prompt)
             record_generation_time((time.time() - generation_start) * 1000)
-            answer = response.content.strip()
 
             confidence = self._estimate_confidence(answer, context)
 
@@ -176,12 +161,10 @@ class RAGPipeline:
 
             latency_ms = (time.time() - start) * 1000
             estimated_tokens = (len(prompt) + len(answer)) // CHARS_PER_TOKEN
-            estimated_cost_usd = (
-                (len(prompt) // CHARS_PER_TOKEN) / 1000 * Config.LLM_INPUT_COST_PER_1K
-                + (len(answer) // CHARS_PER_TOKEN) / 1000 * Config.LLM_OUTPUT_COST_PER_1K
-            )
-            self._log_query(question, intent, query_type, docs, top_similarity, avg_similarity, confidence,
-                             latency_ms, answered=True, llm_skipped=False,
+            # Self-hosted inference carries no per-token API cost; set to 0.0.
+            estimated_cost_usd = 0.0
+            self._log_query(question, intent, query_type, docs, top_similarity, avg_similarity,
+                             confidence, latency_ms, answered=True, llm_skipped=False,
                              estimated_tokens=estimated_tokens, estimated_cost_usd=estimated_cost_usd)
 
             return {
@@ -191,6 +174,8 @@ class RAGPipeline:
                 "intent": intent,
                 "query_type": query_type,
             }
+        except InferenceError:
+            raise
         except Exception as e:
             app_logger.error(f"Error answering question: {e}")
             latency_ms = (time.time() - start) * 1000
@@ -204,8 +189,8 @@ class RAGPipeline:
                 "query_type": query_type,
             }
 
-    def _log_query(self, question, intent, query_type, docs, top_similarity, avg_similarity, confidence,
-                    latency_ms, answered, llm_skipped, estimated_tokens, estimated_cost_usd):
+    def _log_query(self, question, intent, query_type, docs, top_similarity, avg_similarity,
+                    confidence, latency_ms, answered, llm_skipped, estimated_tokens, estimated_cost_usd):
         try:
             self.analytics.log({
                 "timestamp": time.time(),
