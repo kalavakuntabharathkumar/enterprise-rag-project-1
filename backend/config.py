@@ -24,20 +24,35 @@ class Config:
     # the LLM since they need synthesis across chunks.
     FACTUAL_DIRECT_THRESHOLD = float(os.getenv("FACTUAL_DIRECT_THRESHOLD", 0.82))
     # Rough per-1K-token cost estimates (USD) used only for the /stats
-    # endpoint's estimated_cost_per_query figure. These are illustrative
-    # defaults, not live pricing -- override via env vars if your actual
-    # rates differ.
+    # endpoint's estimated_cost_per_query figure.
     LLM_INPUT_COST_PER_1K = float(os.getenv("LLM_INPUT_COST_PER_1K", 0.0005))
     LLM_OUTPUT_COST_PER_1K = float(os.getenv("LLM_OUTPUT_COST_PER_1K", 0.0015))
 
-    # Self-hosted model server.
-    # LLM_BASE_URL: base URL of the inference server (no trailing slash,
-    # no /v1 suffix — the client appends the path).  Both vLLM and
-    # llama.cpp expose an OpenAI-compatible endpoint at /v1/chat/completions.
-    LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llm-server:8000")
+    # Self-hosted inference backend.
+    # LLM_BACKEND selects which server type is running.  Accepted values:
+    #   vllm      — vLLM; default base URL http://llm-server:8000
+    #   llamacpp  — llama.cpp server; default base URL http://llm-server:8080
+    # Set LLM_BASE_URL to override the default for either backend.
+    LLM_BACKEND = os.getenv("LLM_BACKEND", "vllm")
+
+    # Default base URLs per backend (no trailing slash, no /v1 suffix).
+    _BACKEND_DEFAULTS = {
+        "vllm": "http://llm-server:8000",
+        "llamacpp": "http://llm-server:8080",
+    }
+
+    @classmethod
+    def get_llm_base_url(cls) -> str:
+        """Return the effective base URL: explicit LLM_BASE_URL takes
+        priority; otherwise fall back to the per-backend default."""
+        explicit = os.getenv("LLM_BASE_URL")
+        if explicit:
+            return explicit.rstrip("/")
+        return cls._BACKEND_DEFAULTS.get(cls.LLM_BACKEND, "http://llm-server:8000")
+
     # LLM_MODEL: model name sent in the request body.  For vLLM it must
-    # match the --model argument; for llama.cpp it may be any non-empty
-    # string (the server ignores it).
+    # match the --model argument the server was started with; for llama.cpp
+    # it may be any non-empty string (the server ignores it).
     LLM_MODEL = os.getenv("LLM_MODEL", "mistral-7b-instruct")
     LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", 0.1))
     # Seconds before the inference call is treated as failed.
