@@ -8,15 +8,20 @@ version: "3.9"
 # -----------------
 # Start exactly one of the two model-server profiles:
 #
-#   docker compose --profile vllm    up --build   (default)
+#   docker compose --profile vllm     up --build   (default)
 #   docker compose --profile llamacpp up --build
 #
-# Both profiles mount the same models_data volume so the model files are
-# downloaded once and shared between runs.
+# Both model-server services are named "llm-server" in their respective
+# profiles so the backend always resolves the same hostname.  Because
+# docker-compose requires unique service names, the two are distinguished
+# by a suffix but each declares hostname: llm-server so container-to-
+# container DNS is consistent.
 #
-# The backend service is told which server is active via LLM_BACKEND and
-# connects to it at the service name defined below (llm-server), so no
-# LLM_BASE_URL override is needed in the default setup.
+# The backend service does NOT declare depends_on for the model server
+# because depends_on cannot conditionally reference a profile-gated
+# service.  The backend retries inference calls via LLM_TIMEOUT_SECS and
+# surfaces InferenceError as 502, so a briefly-unavailable server is
+# handled gracefully without requiring a hard startup dependency.
 
 services:
   backend:
@@ -37,15 +42,17 @@ services:
       - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.1}
       - LLM_TIMEOUT_SECS=${LLM_TIMEOUT_SECS:-120}
       # LLM_BASE_URL is intentionally unset here so Config.get_llm_base_url()
-      # resolves the correct default for the active backend (vllm → 8000,
-      # llamacpp → 8080).  Set it explicitly only if the server runs on a
-      # non-standard host or port.
+      # resolves the correct default for the active backend:
+      #   vllm     -> http://llm-server:8000
+      #   llamacpp -> http://llm-server:8080
+      # Both model-server services below set hostname: llm-server so this
+      # resolves correctly in either profile.
     volumes:
       - vectorstore_data:/app/vectorstore
       - ./data:/app/data
       - ./logs:/app/logs
     depends_on:
-      - llm-server
+      - frontend
 
   frontend:
     build:
@@ -59,15 +66,17 @@ services:
       - backend
 
   # vLLM — OpenAI-compatible inference server.
-  # Requires a CUDA-capable GPU on the host.  Pass --model to point at a
-  # local path or a Hugging Face model ID; mount models_data at /models to
-  # avoid re-downloading between restarts.
-  llm-server:
+  # Requires a CUDA-capable GPU on the host.  Model weights are cached in
+  # models_data at /models to avoid re-downloading between restarts.
+  # Host port 8001 is exposed for direct access/debugging; the backend
+  # reaches vLLM at http://llm-server:8000 over the internal Docker network.
+  llm-server-vllm:
     image: vllm/vllm-openai:latest
+    hostname: llm-server
     profiles:
       - vllm
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
     command: >
@@ -84,10 +93,13 @@ services:
               capabilities: [gpu]
 
   # llama.cpp — CPU-first inference server with optional GPU offload.
-  # Set LLAMA_MODEL_PATH to the path (inside the container) of the GGUF
-  # model file; mount models_data at /models and place the file there.
-  llama-server:
+  # Place the GGUF model file inside the models_data volume at
+  # /models/<LLAMA_MODEL_FILE> before starting.
+  # Host port 8080 is exposed for direct access/debugging; the backend
+  # reaches llama.cpp at http://llm-server:8080 over the internal network.
+  llm-server-llamacpp:
     image: ghcr.io/ggerganov/llama.cpp:server
+    hostname: llm-server
     profiles:
       - llamacpp
     ports:
