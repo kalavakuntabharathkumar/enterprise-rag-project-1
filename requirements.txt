@@ -5,6 +5,7 @@ langchain
 langchain-openai
 langchain-community
 langchain-text-splitters
+langgraph
 faiss-cpu
 pypdf
 python-dotenv
