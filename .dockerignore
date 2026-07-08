@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+logs/
+vectorstore/
+data/*.pdf
+.git/
+tuning/tuning_results.csv
+ml/models/

@@ -1,0 +1,38 @@
+version: "3.9"
+
+# FAISS runs embedded inside the backend process (it is a library, not a
+# server), so there is no separate vector-database container. What it
+# needs from "a vector DB service" is persistence across restarts, which
+# is handled by the `vectorstore_data` volume below.
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - VECTORSTORE_PATH=/app/vectorstore
+      - DATA_PATH=/app/data
+      - LOGS_PATH=/app/logs
+      - API_KEY=${API_KEY:-}
+    volumes:
+      - vectorstore_data:/app/vectorstore
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+
+volumes:
+  vectorstore_data:
