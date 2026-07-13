@@ -109,7 +109,7 @@ async def ask_question(request: QuestionRequest):
     """
     try:
         result = rag_pipeline.ask_question(request.question)
-        return AnswerResponse(**result)
+        return AskResponse(**result)
     except InferenceError as e:
         app_logger.error(f"Model server error while answering question: {e}")
         raise HTTPException(status_code=502, detail="The language model server is unavailable. Please try again shortly.")
