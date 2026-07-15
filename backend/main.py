@@ -107,13 +107,22 @@ async def ask_question(request: QuestionRequest):
     `QuestionRequest.question` already rejects empty strings via
     `min_length=1`, so an empty query never reaches here — FastAPI returns
     a 422 with the validation detail first.
+
+    Pass an optional `session_id` in the request body to enable multi-turn
+    conversation memory: the LangGraph checkpointer replays the prior state
+    for that thread on every subsequent request with the same id.
     """
     try:
-        result = rag_pipeline.ask_question(request.question)
+        result = await rag_pipeline.ask_question(
+            request.question, session_id=request.session_id
+        )
         return AskResponse(**result)
     except InferenceError as e:
         app_logger.error(f"Model server error while answering question: {e}")
-        raise HTTPException(status_code=502, detail="The language model server is unavailable. Please try again shortly.")
+        raise HTTPException(
+            status_code=502,
+            detail="The language model server is unavailable. Please try again shortly.",
+        )
     except Exception as e:
         app_logger.error(f"Error processing question: {e}")
         raise HTTPException(status_code=500, detail="Error processing question")

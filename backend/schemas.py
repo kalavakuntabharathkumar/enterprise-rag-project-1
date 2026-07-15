@@ -6,6 +6,14 @@ from pydantic import BaseModel, Field
 
 class QuestionRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
+    session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional session / thread identifier for multi-turn memory. "
+            "Requests sharing the same session_id see each other's prior state "
+            "via the LangGraph MemorySaver checkpointer."
+        ),
+    )
 
 
 class AskResponse(BaseModel):
