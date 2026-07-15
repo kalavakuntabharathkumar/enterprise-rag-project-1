@@ -5,6 +5,7 @@ import uuid
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from analytics.metrics import summarize
@@ -26,6 +27,18 @@ from backend.schemas import (
 from backend.utils import save_uploaded_file
 
 app = FastAPI(title="Enterprise AI Document Assistant", version="1.2.0")
+
+# CORS — required so browsers can call the API directly.
+# CORS_ORIGINS defaults to "*" (open); set it to a comma-separated list of
+# allowed origins in production, e.g. "https://your-frontend.com".
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 rag_pipeline = RAGPipeline()
 latency_log = LatencyLog()

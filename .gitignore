@@ -23,3 +23,8 @@ tuning/tuning_results.csv
 eval/*.csv
 .idea/
 .vscode/.replit
+
+# Next.js frontend
+frontend-next/.next/
+frontend-next/node_modules/
+frontend-next/.env.local
