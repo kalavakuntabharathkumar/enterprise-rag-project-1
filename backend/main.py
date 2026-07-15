@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import uuid
@@ -32,23 +33,27 @@ latency_log = LatencyLog()
 
 @app.middleware("http")
 async def latency_logging_middleware(request: Request, call_next):
-    """Times every request end-to-end and pairs it with the
-    retrieval/generation phase breakdown `RAGPipeline.ask_question` records
-    for that same request, writing one row per request to
-    `logs/latency.csv`."""
+    """Times every request end-to-end and pairs it with the retrieval /
+    generation phase breakdown recorded for that request, writing one row
+    per request to ``logs/latency.csv``.
+
+    The CSV append (``latency_log.log``) is synchronous file I/O — it runs
+    in a thread so it does not block the event loop.
+    """
     start = time.time()
     recorder = start_recording()
     response = await call_next(request)
     total_ms = (time.time() - start) * 1000
 
+    record = {
+        "timestamp": time.time(),
+        "path": request.url.path,
+        "retrieval_time_ms": recorder.retrieval_ms,
+        "generation_time_ms": recorder.generation_ms,
+        "total_time_ms": total_ms,
+    }
     try:
-        latency_log.log({
-            "timestamp": time.time(),
-            "path": request.url.path,
-            "retrieval_time_ms": recorder.retrieval_ms,
-            "generation_time_ms": recorder.generation_ms,
-            "total_time_ms": total_ms,
-        })
+        await asyncio.to_thread(latency_log.log, record)
     except Exception as e:
         app_logger.warning(f"Failed to log request latency: {e}")
 
@@ -74,16 +79,27 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 @app.post("/upload", response_model=UploadResponse, summary="Upload and process a PDF document",
           dependencies=[Depends(verify_api_key)])
 async def upload_pdf(file: UploadFile = File(...)):
-    """Upload a PDF file and process it for Q&A."""
+    """Upload a PDF file and process it for Q&A.
+
+    Both the file write and PDF processing are blocking operations (disk
+    I/O, OpenAI embedding calls, FAISS indexing) — they run in a thread
+    pool via ``asyncio.to_thread`` so the event loop stays free to handle
+    other requests during ingestion.
+    """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
     try:
         file_id = str(uuid.uuid4())
         file_path = os.path.join(Config.DATA_PATH, f"{file_id}.pdf")
-        save_uploaded_file(file, file_path)
 
-        result = rag_pipeline.process_pdf(file_path)
+        # save_uploaded_file awaits file.read() then offloads the disk
+        # write to a thread internally.
+        await save_uploaded_file(file, file_path)
+
+        # PDF extraction, preprocessing, embedding, and FAISS indexing are
+        # all synchronous and potentially long-running — run in a thread.
+        result = await asyncio.to_thread(rag_pipeline.process_pdf, file_path)
 
         if result["status"] == "success":
             return UploadResponse(
@@ -104,11 +120,11 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def ask_question(request: QuestionRequest):
     """Ask a question and get an answer based on uploaded documents.
 
-    `QuestionRequest.question` already rejects empty strings via
-    `min_length=1`, so an empty query never reaches here — FastAPI returns
+    ``QuestionRequest.question`` already rejects empty strings via
+    ``min_length=1``, so an empty query never reaches here — FastAPI returns
     a 422 with the validation detail first.
 
-    Pass an optional `session_id` in the request body to enable multi-turn
+    Pass an optional ``session_id`` in the request body to enable multi-turn
     conversation memory: the LangGraph checkpointer replays the prior state
     for that thread on every subsequent request with the same id.
     """
@@ -131,9 +147,13 @@ async def ask_question(request: QuestionRequest):
 @app.get("/health", response_model=HealthResponse, summary="Health check")
 async def health_check():
     """Report service health, including whether a vector index exists and
-    whether the OpenAI credentials required for embeddings are configured."""
+    whether the OpenAI credentials required for embeddings are configured.
+
+    ``load_vectorstore`` deserializes a pickle file from disk — run in a
+    thread to avoid blocking the event loop.
+    """
     if rag_pipeline.retriever.vectorstore is None:
-        rag_pipeline.retriever.load_vectorstore()
+        await asyncio.to_thread(rag_pipeline.retriever.load_vectorstore)
 
     return HealthResponse(
         status="healthy",
@@ -146,9 +166,17 @@ async def health_check():
          summary="Query and retrieval analytics", dependencies=[Depends(verify_api_key)])
 async def analytics_summary():
     """Aggregate stats over every logged query: latency distribution,
-    similarity distribution and an approximate precision@k."""
-    df = QueryAnalytics().load()
-    return summarize(df)
+    similarity distribution and an approximate precision@k.
+
+    ``QueryAnalytics.load()`` reads a CSV file and ``summarize`` runs
+    pandas/numpy computation — both run together in a single thread to
+    avoid two separate thread-pool round-trips.
+    """
+    def _load_and_summarize() -> dict:
+        df = QueryAnalytics().load()
+        return summarize(df)
+
+    return await asyncio.to_thread(_load_and_summarize)
 
 
 @app.get("/stats", response_model=StatsResponse, summary="System/scale stats",
@@ -156,10 +184,17 @@ async def analytics_summary():
 async def stats():
     """Real system/scale stats, computed from the live vector index and
     query log rather than hardcoded: how much has been indexed, and what a
-    typical query costs in tokens/dollars."""
-    vector_stats = rag_pipeline.retriever.get_stats()
+    typical query costs in tokens/dollars.
 
-    df = QueryAnalytics().load()
+    ``get_stats()`` (FAISS introspection + disk stat) and
+    ``QueryAnalytics.load()`` (CSV read) are independent — they run
+    concurrently in separate threads via ``asyncio.gather``.
+    """
+    vector_stats, df = await asyncio.gather(
+        asyncio.to_thread(rag_pipeline.retriever.get_stats),
+        asyncio.to_thread(QueryAnalytics().load),
+    )
+
     avg_tokens = float(df["estimated_tokens"].mean()) if not df.empty and "estimated_tokens" in df else 0.0
     avg_cost = float(df["estimated_cost_usd"].mean()) if not df.empty and "estimated_cost_usd" in df else 0.0
 
